@@ -160,12 +160,15 @@ function Find-StockTokenRetrySite {
             continue
         }
 
-        $branch = $instructions[$i + 1]
-        $isPatched = $false
-        if ($branch.OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Pop -and
+        $quantityResult = $instructions[$i + 1]
+        $branch = $quantityResult
+        $isBypassed = $false
+        $bypassInstruction = $null
+        if ($quantityResult.OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Pop -and
             $instructions[$i + 2].OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Br) {
-            $branch = $instructions[$i + 2]
-            $isPatched = $true
+            $bypassInstruction = $instructions[$i + 2]
+            $branch = $bypassInstruction
+            $isBypassed = $true
         }
 
         if ($branch.OpCode.Code -ne [dnlib.DotNet.Emit.Code]::Brtrue -and
@@ -178,9 +181,8 @@ function Find-StockTokenRetrySite {
             continue
         }
 
-        $retryOffset = if ($isPatched) { 4 } else { 3 }
+        $retryOffset = if ($isBypassed) { 4 } else { 3 }
         if (-not $instructions[$i + $retryOffset].IsLdcI4() -or
-            $instructions[$i + $retryOffset].GetLdcI4Value() -ne 60 -or
             -not (Test-FieldInstruction $instructions[$i + $retryOffset + 1] $StockTimeLeftField)) {
             continue
         }
@@ -188,13 +190,34 @@ function Find-StockTokenRetrySite {
         return [pscustomobject]@{
             Method = $timerMoveNext
             QuantityInstruction = $instructions[$i]
-            BranchInstruction = $branch
+            QuantityResultInstruction = $quantityResult
+            BypassInstruction = $bypassInstruction
+            ReadyInstruction = $branch.Operand
             RetryWaitInstruction = $instructions[$i + $retryOffset]
-            IsPatched = $isPatched
+            IsBypassed = $isBypassed
         }
     }
 
     throw 'Could not find the stock-token retry branch in Shop.TimerUpdate. The game version may be unsupported.'
+}
+
+function Find-SteamFailureRetrySite {
+    param($ShopType, $StockTimeLeftField)
+
+    $method = Get-SingleItem ($ShopType.Methods | Where-Object {
+        $_.Name -eq 'SetSuccessVisuals' -and $_.HasBody
+    }) 'Shop.SetSuccessVisuals method'
+
+    $matches = @()
+    $instructions = $method.Body.Instructions
+    for ($i = 1; $i -lt $instructions.Count; $i++) {
+        if ($instructions[$i - 1].IsLdcI4() -and
+            (Test-FieldInstruction $instructions[$i] $StockTimeLeftField)) {
+            $matches += $instructions[$i - 1]
+        }
+    }
+
+    return Get-SingleItem $matches 'Steam failure retry initializer in Shop.SetSuccessVisuals'
 }
 
 function Assert-GameIsClosed {
@@ -344,14 +367,20 @@ try {
         $stockTokenRetrySite.RetryWaitInstruction.Operand = [int]$StockRefreshSeconds
         $changes += "Stock-token retry wait: $oldRetryWait -> $StockRefreshSeconds seconds"
     }
-    if (-not $stockTokenRetrySite.IsPatched) {
+    if ($stockTokenRetrySite.IsBypassed) {
         $tokenInstructions = $stockTokenRetrySite.Method.Body.Instructions
-        $branchIndex = $tokenInstructions.IndexOf($stockTokenRetrySite.BranchInstruction)
-        $readyInstruction = $stockTokenRetrySite.BranchInstruction.Operand
-        $stockTokenRetrySite.BranchInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Pop
-        $stockTokenRetrySite.BranchInstruction.Operand = $null
-        $tokenInstructions.Insert($branchIndex + 1, [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Br, $readyInstruction))
-        $changes += "Stock-token check: bypassed in $($stockTokenRetrySite.Method.Name)"
+        $stockTokenRetrySite.QuantityResultInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Brtrue
+        $stockTokenRetrySite.QuantityResultInstruction.Operand = $stockTokenRetrySite.ReadyInstruction
+        $tokenInstructions.Remove($stockTokenRetrySite.BypassInstruction) | Out-Null
+        $changes += "Stock-token check: restored in $($stockTokenRetrySite.Method.Name)"
+    }
+
+    $steamFailureRetryInstruction = Find-SteamFailureRetrySite $shop $stockTimeLeftField
+    $oldSteamFailureWait = $steamFailureRetryInstruction.GetLdcI4Value()
+    if ($oldSteamFailureWait -ne $StockRefreshSeconds) {
+        $steamFailureRetryInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Ldc_I4
+        $steamFailureRetryInstruction.Operand = [int]$StockRefreshSeconds
+        $changes += "Steam failure retry wait: $oldSteamFailureWait -> $StockRefreshSeconds seconds"
     }
 
     if ($changes.Count -eq 0) {

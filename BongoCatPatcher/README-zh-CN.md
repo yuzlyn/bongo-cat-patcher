@@ -3,7 +3,7 @@
 本工具修改游戏目录中的 `BongoCat_Data/Managed/Assembly-CSharp.dll`，默认设置为：
 
 - 自动购买已刷新的箱子
-- 箱子刷新时间 300 秒
+- 箱子检查与失败重试时间 300 秒
 - 点击倍率 1000 倍
 
 ## 使用
@@ -26,7 +26,7 @@
 .\Patch-BongoCat.ps1 -StockRefreshSeconds 600 -ClickMultiplier 100
 ```
 
-刷新时间允许范围是 60 到 86400 秒。设置过短可能导致 Steam 请求错误。
+刷新时间允许范围是 60 到 86400 秒。补丁只会在 Steam 已实际发放箱子 Token 时自动开箱；没有 Token 时会按设定时间再次检查，避免无效兑换触发 Steam Error。箱子 Token 和物品由 Steam 服务器管理，本工具不会伪造或绕过服务器库存。
 
 其他可用参数：
 
