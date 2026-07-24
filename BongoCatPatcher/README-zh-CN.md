@@ -28,6 +28,24 @@
 
 刷新时间允许范围是 60 到 86400 秒。补丁只会在 Steam 已实际发放箱子 Token 时自动开箱；没有 Token 时会按设定时间再次检查，避免无效兑换触发 Steam Error。箱子 Token 和物品由 Steam 服务器管理，本工具不会伪造或绕过服务器库存。
 
+## Token 与倒计时说明
+
+`StockRefreshSeconds` 设置的是本地检查与失败重试周期，不是 Steam 服务器的箱子发放周期。默认值 `300` 表示每五分钟检查一次库存中的箱子 Token。
+
+- 倒计时结束且已有 Token：满足宠物点数要求时自动开箱，并由 Steam 发放实际物品。
+- 倒计时结束但没有 Token：不执行无效兑换，倒计时重新从五分钟开始。
+- 倒计时重新开始但没有箱子，并不表示补丁失效；通常表示 Steam 尚未发放 Token。
+- 修改 DLL 无法强制 Steam 每五分钟生成 Token，也不能绕过 Steam 的服务器库存和掉落规则。
+
+旧版补丁曾在没有 Token 时强行调用开箱，游戏日志会反复出现以下内容并最终显示 Steam Error：
+
+```text
+SteamExchange | Not enough items to exchange for Chest Exchange, missing 1 of Chest Token
+Chest Exchange failed after multiple retries, giving up!
+```
+
+`v1.0.5` 起会保留真实 Token 检查，从而避免此错误。Windows 下可在 `%USERPROFILE%\AppData\LocalLow\Irox Games\BongoCat\Player.log` 查看游戏日志。
+
 其他可用参数：
 
 ```powershell
