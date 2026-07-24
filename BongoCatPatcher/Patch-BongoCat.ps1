@@ -3,7 +3,10 @@ param(
     [string]$GamePath,
 
     [ValidateRange(60, 86400)]
-    [int]$StockRefreshSeconds = 300,
+    [int]$StockRefreshSeconds = 1800,
+
+    [ValidateRange(10, 3600)]
+    [int]$TokenRetrySeconds = 60,
 
     [ValidateRange(1, 1000000)]
     [int]$ClickMultiplier = 1000,
@@ -72,6 +75,15 @@ function Test-FieldInstruction {
     return ($null -ne $Instruction -and
         $null -ne $Instruction.Operand -and
         [string]$Instruction.Operand -eq [string]$Field.FullName)
+}
+
+function Test-StringMarker {
+    param($Method, [string]$Marker)
+
+    return @($Method.Body.Instructions | Where-Object {
+        $_.OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Ldstr -and
+        [string]$_.Operand -eq $Marker
+    }).Count -gt 0
 }
 
 function New-InstructionCopy {
@@ -217,7 +229,67 @@ function Find-SteamFailureRetrySite {
         }
     }
 
-    return Get-SingleItem $matches 'Steam failure retry initializer in Shop.SetSuccessVisuals'
+    $retryWaitInstruction = Get-SingleItem $matches 'Steam failure retry initializer in Shop.SetSuccessVisuals'
+    return [pscustomobject]@{
+        Method = $method
+        RetryWaitInstruction = $retryWaitInstruction
+        RetryWaitStoreInstruction = $instructions[$instructions.IndexOf($retryWaitInstruction) + 1]
+    }
+}
+
+function Find-ChestExchangeRetrySite {
+    param($Module)
+
+    $chestExchanger = Get-SingleItem ($Module.GetTypes() | Where-Object {
+        $_.FullName -eq 'Steam.ChestExchanger'
+    }) 'Steam.ChestExchanger type'
+    $openChest = Get-SingleItem ($chestExchanger.Methods | Where-Object {
+        $_.Name -eq 'OpenChest' -and $_.HasBody
+    }) 'Steam.ChestExchanger.OpenChest method'
+
+    $instructions = $openChest.Body.Instructions
+    $matches = @()
+    for ($i = 1; $i -lt $instructions.Count; $i++) {
+        if ($instructions[$i - 1].IsLdcI4() -and
+            (Test-MethodCall $instructions[$i] 'Steam.ChestExchanger' 'ExchangeWhenReady')) {
+            $matches += $instructions[$i - 1]
+        }
+    }
+
+    return Get-SingleItem $matches 'initial chest exchange retry count'
+}
+
+function Find-TokenPollGate {
+    param($TokenSite, $StockTimeLeftField)
+
+    $instructions = $TokenSite.Method.Body.Instructions
+    $quantityIndex = $instructions.IndexOf($TokenSite.QuantityInstruction)
+    for ($i = $quantityIndex - 1; $i -ge [Math]::Max(3, $quantityIndex - 16); $i--) {
+        $isOriginal = (($instructions[$i].OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Bgt -or
+                $instructions[$i].OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Bgt_S) -and
+            $instructions[$i - 1].IsLdcI4() -and
+            (Test-FieldInstruction $instructions[$i - 2] $StockTimeLeftField))
+        $isUnsafeBypass = (($instructions[$i].OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Br -or
+                $instructions[$i].OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Br_S) -and
+            $instructions[$i].Operand -eq $instructions[$i + 1] -and
+            $instructions[$i - 1].OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Nop -and
+            $instructions[$i - 2].OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Nop -and
+            $instructions[$i - 3].OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Nop)
+        if (-not $isOriginal -and -not $isUnsafeBypass) {
+            continue
+        }
+
+        return [pscustomobject]@{
+            OwnerLoadInstruction = $instructions[$i - 3]
+            TimeLoadInstruction = $instructions[$i - 2]
+            ZeroInstruction = $instructions[$i - 1]
+            BranchInstruction = $instructions[$i]
+            TokenCheckInstruction = $instructions[$i + 1]
+            IsUnsafeBypass = $isUnsafeBypass
+        }
+    }
+
+    throw 'Could not find the countdown gate before the stock-token check.'
 }
 
 function Assert-GameIsClosed {
@@ -281,6 +353,23 @@ try {
     $buyMethod = Get-SingleItem (($module.GetTypes() | Where-Object FullName -eq 'BongoCat.ShopItem').Methods | Where-Object {
         $_.Name -eq 'Buy' -and $_.Parameters.Count -eq 1
     }) 'ShopItem.Buy method'
+    $shopItem = Get-SingleItem ($module.GetTypes() | Where-Object FullName -eq 'BongoCat.ShopItem') 'BongoCat.ShopItem type'
+    $waitingForServerField = Get-SingleItem ($shopItem.Fields | Where-Object Name -eq '_waitingForServer') 'ShopItem._waitingForServer field'
+    $normalShopField = Get-SingleItem ($shop.Fields | Where-Object Name -eq 'NormalShop') 'Shop.NormalShop field'
+    $emoteShopField = Get-SingleItem ($shop.Fields | Where-Object Name -eq 'EmoteShop') 'Shop.EmoteShop field'
+    $steamInventory = Get-SingleItem ($module.GetTypes() | Where-Object FullName -eq 'SteamTools.Game/Inventory') 'SteamTools.Game.Inventory type'
+    $chestTokenField = Get-SingleItem ($steamInventory.Fields | Where-Object Name -eq 'Chest_Token') 'Inventory.Chest_Token field'
+    $emoteChestTokenField = Get-SingleItem ($steamInventory.Fields | Where-Object Name -eq 'Emote_Chest_Token') 'Inventory.Emote_Chest_Token field'
+    $unityLogMethod = Get-SingleItem ($module.GetMemberRefs() | Where-Object {
+        $_.Name -eq 'Log' -and
+        $_.DeclaringType.FullName -eq 'UnityEngine.Debug' -and
+        $_.MethodSig.Params.Count -eq 1 -and
+        $_.MethodSig.Params[0].FullName -eq 'System.Object'
+    }) 'UnityEngine.Debug.Log(object) method reference'
+    $getTotalQuantityMethod = Get-SingleItem ($module.GetMemberRefs() | Where-Object {
+        $_.Name -eq 'GetTotalQuantity' -and
+        $_.DeclaringType.FullName -eq 'Heathen.SteamworksIntegration.ItemData'
+    }) 'ItemData.GetTotalQuantity method reference'
 
     $shopConstructor = Get-SingleItem ($shop.Methods | Where-Object {
         $_.Name -eq '.ctor' -and $_.HasBody
@@ -362,10 +451,10 @@ try {
 
     $stockTokenRetrySite = Find-StockTokenRetrySite $module $shop $stockTimeLeftField
     $oldRetryWait = $stockTokenRetrySite.RetryWaitInstruction.GetLdcI4Value()
-    if ($oldRetryWait -ne $StockRefreshSeconds) {
+    if ($oldRetryWait -ne $TokenRetrySeconds) {
         $stockTokenRetrySite.RetryWaitInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Ldc_I4
-        $stockTokenRetrySite.RetryWaitInstruction.Operand = [int]$StockRefreshSeconds
-        $changes += "Stock-token retry wait: $oldRetryWait -> $StockRefreshSeconds seconds"
+        $stockTokenRetrySite.RetryWaitInstruction.Operand = [int]$TokenRetrySeconds
+        $changes += "Stock-token retry wait: $oldRetryWait -> $TokenRetrySeconds seconds"
     }
     if ($stockTokenRetrySite.IsBypassed) {
         $tokenInstructions = $stockTokenRetrySite.Method.Body.Instructions
@@ -375,12 +464,183 @@ try {
         $changes += "Stock-token check: restored in $($stockTokenRetrySite.Method.Name)"
     }
 
-    $steamFailureRetryInstruction = Find-SteamFailureRetrySite $shop $stockTimeLeftField
-    $oldSteamFailureWait = $steamFailureRetryInstruction.GetLdcI4Value()
-    if ($oldSteamFailureWait -ne $StockRefreshSeconds) {
-        $steamFailureRetryInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Ldc_I4
-        $steamFailureRetryInstruction.Operand = [int]$StockRefreshSeconds
-        $changes += "Steam failure retry wait: $oldSteamFailureWait -> $StockRefreshSeconds seconds"
+    $pollMarker = '[BongoCatPatcher] TOKEN DETECTED: chest token is present; starting immediate claim.'
+    $pollGate = Find-TokenPollGate $stockTokenRetrySite $stockTimeLeftField
+    if ($pollGate.IsUnsafeBypass) {
+        $retryStoreIndex = $stockTokenRetrySite.Method.Body.Instructions.IndexOf($stockTokenRetrySite.RetryWaitInstruction) + 1
+        $retryExitBranch = $stockTokenRetrySite.Method.Body.Instructions[$retryStoreIndex + 1]
+        $ownerLoad = New-InstructionCopy $pollGate.TokenCheckInstruction
+
+        $pollGate.OwnerLoadInstruction.OpCode = $ownerLoad.OpCode
+        $pollGate.OwnerLoadInstruction.Operand = $ownerLoad.Operand
+        $pollGate.TimeLoadInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Ldfld
+        $pollGate.TimeLoadInstruction.Operand = $stockTimeLeftField
+        $pollGate.ZeroInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Ldc_I4_0
+        $pollGate.ZeroInstruction.Operand = $null
+        $pollGate.BranchInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Bgt
+        $pollGate.BranchInstruction.Operand = $retryExitBranch.Operand
+        $changes += 'Chest claim debounce: restored countdown gate to prevent stale-token duplicate exchanges'
+    }
+    if (-not (Test-StringMarker $stockTokenRetrySite.Method $pollMarker)) {
+        $readyInstruction = $stockTokenRetrySite.ReadyInstruction
+        $readyIndex = $stockTokenRetrySite.Method.Body.Instructions.IndexOf($readyInstruction)
+        $readyLog = [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldstr, $pollMarker)
+        $stockTokenRetrySite.Method.Body.Instructions.Insert($readyIndex, $readyLog)
+        $stockTokenRetrySite.Method.Body.Instructions.Insert($readyIndex + 1,
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Call, $unityLogMethod))
+        $stockTokenRetrySite.QuantityResultInstruction.Operand = $readyLog
+        $changes += 'Token-driven chest claim: token callbacks trigger an immediate, single exchange'
+    }
+
+    $steamFailureRetrySite = Find-SteamFailureRetrySite $shop $stockTimeLeftField
+    $oldSteamFailureWait = $steamFailureRetrySite.RetryWaitInstruction.GetLdcI4Value()
+    if ($oldSteamFailureWait -ne $TokenRetrySeconds) {
+        $steamFailureRetrySite.RetryWaitInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Ldc_I4
+        $steamFailureRetrySite.RetryWaitInstruction.Operand = [int]$TokenRetrySeconds
+        $changes += "Steam failure retry wait: $oldSteamFailureWait -> $TokenRetrySeconds seconds"
+    }
+
+    $getAllItemsMethod = Get-SingleItem ($module.GetMemberRefs() | Where-Object {
+        $_.Name -eq 'GetAllItems' -and
+        $_.DeclaringType.FullName -eq 'Heathen.SteamworksIntegration.API.Inventory/Client'
+    }) 'Steam inventory GetAllItems method reference'
+    $failureInstructions = $steamFailureRetrySite.Method.Body.Instructions
+    $failureStoreIndex = $failureInstructions.IndexOf($steamFailureRetrySite.RetryWaitStoreInstruction)
+    $hasFailureRefresh = ($failureStoreIndex -ge 0 -and
+        $failureStoreIndex + 2 -lt $failureInstructions.Count -and
+        $failureInstructions[$failureStoreIndex + 1].OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Ldnull -and
+        (Test-MethodCall $failureInstructions[$failureStoreIndex + 2] 'Heathen.SteamworksIntegration.API.Inventory/Client' 'GetAllItems'))
+    if (-not $hasFailureRefresh) {
+        $failureInstructions.Insert($failureStoreIndex + 1,
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldnull))
+        $failureInstructions.Insert($failureStoreIndex + 2,
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Call, $getAllItemsMethod))
+        $changes += 'Steam inventory refresh after a failed chest exchange: enabled'
+    }
+
+    $playtimeDropClosure = Get-SingleItem ($module.GetTypes() | Where-Object FullName -eq 'BongoCat.PlaytimeItemDrop/<>c') 'PlaytimeItemDrop closure type'
+    $dropCallback = Get-SingleItem ($playtimeDropClosure.Methods | Where-Object {
+        $_.Name -eq '<Start>b__1_1' -and $_.HasBody
+    }) 'Playtime token-drop callback'
+    $dropCallbackMarker = '[BongoCatPatcher] DROP CALLBACK: Steam finished a token-drop request.'
+    if (-not (Test-StringMarker $dropCallback $dropCallbackMarker)) {
+        $dropInstructions = $dropCallback.Body.Instructions
+        $returnInstruction = $dropInstructions[$dropInstructions.Count - 1]
+        $normalTokenLog = [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldstr,
+            '[BongoCatPatcher] TOKEN RECEIVED: normal chest token is in inventory.')
+        $emoteTokenLog = [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldstr,
+            '[BongoCatPatcher] TOKEN RECEIVED: emote chest token is in inventory.')
+        $noTokenLog = [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldstr,
+            '[BongoCatPatcher] NO TOKEN: drop request completed without a chest token; inventory refresh requested.')
+        $refreshInstruction = [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldnull)
+
+        $newInstructions = @(
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldstr, $dropCallbackMarker),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Call, $unityLogMethod),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldsflda, $chestTokenField),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Call, $getTotalQuantityMethod),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldc_I4_0),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Conv_I8),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Bgt, $normalTokenLog),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldsflda, $emoteChestTokenField),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Call, $getTotalQuantityMethod),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldc_I4_0),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Conv_I8),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Bgt, $emoteTokenLog),
+            $noTokenLog,
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Call, $unityLogMethod),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Br, $refreshInstruction),
+            $normalTokenLog,
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Call, $unityLogMethod),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldsfld, $normalShopField),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Brfalse, $refreshInstruction),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldsfld, $normalShopField),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldc_I4_0),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Stfld, $stockTimeLeftField),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Br, $refreshInstruction),
+            $emoteTokenLog,
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Call, $unityLogMethod),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldsfld, $emoteShopField),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Brfalse, $refreshInstruction),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldsfld, $emoteShopField),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldc_I4_0),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Stfld, $stockTimeLeftField),
+            $refreshInstruction,
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Call, $getAllItemsMethod)
+        )
+        $returnIndex = $dropInstructions.IndexOf($returnInstruction)
+        for ($i = 0; $i -lt $newInstructions.Count; $i++) {
+            $dropInstructions.Insert($returnIndex + $i, $newInstructions[$i])
+        }
+        $changes += 'Token-drop callback: immediate claim trigger and receipt/no-token logs enabled'
+    }
+
+    $startBuy = Get-SingleItem ($shopItem.Methods | Where-Object {
+        $_.Name -eq 'StartBuy' -and $_.HasBody
+    }) 'ShopItem.StartBuy method'
+    $claimStartMarker = '[BongoCatPatcher] CLAIM START: submitting chest exchange to Steam.'
+    $startBuyInstructions = $startBuy.Body.Instructions
+    $startMarkerInstruction = @($startBuyInstructions | Where-Object {
+        $_.OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Ldstr -and $_.Operand -eq $claimStartMarker
+    }) | Select-Object -First 1
+    $waitingStore = @($startBuyInstructions | Where-Object {
+        $_.OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Stfld -and
+        (Test-FieldInstruction $_ $waitingForServerField)
+    }) | Select-Object -First 1
+    if ($null -eq $waitingStore) {
+        throw 'Could not find the ShopItem._waitingForServer guard assignment.'
+    }
+    $waitingStoreIndex = $startBuyInstructions.IndexOf($waitingStore)
+    $markerIsAfterGuard = ($null -ne $startMarkerInstruction -and
+        $startBuyInstructions.IndexOf($startMarkerInstruction) -eq ($waitingStoreIndex + 1))
+    if (-not $markerIsAfterGuard) {
+        if ($null -ne $startMarkerInstruction) {
+            $markerIndex = $startBuyInstructions.IndexOf($startMarkerInstruction)
+            if ($markerIndex + 1 -lt $startBuyInstructions.Count -and
+                (Test-MethodCall $startBuyInstructions[$markerIndex + 1] 'UnityEngine.Debug' 'Log')) {
+                $startBuyInstructions.RemoveAt($markerIndex + 1)
+            }
+            $startBuyInstructions.Remove($startMarkerInstruction) | Out-Null
+        }
+        $waitingStoreIndex = $startBuyInstructions.IndexOf($waitingStore)
+        $startBuyInstructions.Insert($waitingStoreIndex + 1,
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldstr, $claimStartMarker))
+        $startBuyInstructions.Insert($waitingStoreIndex + 2,
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Call, $unityLogMethod))
+        $changes += 'Chest claim start log: moved after the duplicate-request guard'
+    }
+
+    $claimCallback = Get-SingleItem ($shopItem.Methods | Where-Object {
+        $_.Name -eq 'Callback' -and $_.HasBody
+    }) 'ShopItem.Callback method'
+    $claimSuccessMarker = '[BongoCatPatcher] CLAIM SUCCESS: Steam exchanged the token and granted the chest item.'
+    if (-not (Test-StringMarker $claimCallback $claimSuccessMarker)) {
+        $callbackInstructions = $claimCallback.Body.Instructions
+        $originalFirst = $callbackInstructions[0]
+        $successLog = [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldstr, $claimSuccessMarker)
+        $callbackPrefix = @(
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldarg_1),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldc_I4_M1),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Bne_Un, $successLog),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldstr,
+                '[BongoCatPatcher] CLAIM FAILED: Steam rejected the exchange; inventory will refresh and retry when a token is visible.'),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Call, $unityLogMethod),
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Br, $originalFirst),
+            $successLog,
+            [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Call, $unityLogMethod)
+        )
+        for ($i = 0; $i -lt $callbackPrefix.Count; $i++) {
+            $callbackInstructions.Insert($i, $callbackPrefix[$i])
+        }
+        $changes += 'Chest claim result logs: success and failure enabled'
+    }
+
+    $exchangeRetryInstruction = Find-ChestExchangeRetrySite $module
+    $oldExchangeRetries = $exchangeRetryInstruction.GetLdcI4Value()
+    if ($oldExchangeRetries -ne 0) {
+        $exchangeRetryInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Ldc_I4_0
+        $exchangeRetryInstruction.Operand = $null
+        $changes += "Immediate chest exchange retries: $oldExchangeRetries -> 0"
     }
 
     if ($changes.Count -eq 0) {
@@ -412,6 +672,7 @@ try {
     if (Test-Path -LiteralPath $tempDll) {
         Remove-Item -LiteralPath $tempDll -Force
     }
+    $stockTokenRetrySite.Method.Body.SimplifyBranches()
     $module.Write($tempDll)
 }
 finally {

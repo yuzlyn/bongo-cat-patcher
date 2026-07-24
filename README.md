@@ -7,7 +7,7 @@
 ## 預設功能
 
 - 自動購買已刷新的寶箱
-- 寶箱檢查與失敗重試時間為 300 秒（五分鐘）
+- 以 Steam Token 到帳回呼為準，立即觸發一次開箱；成功後恢復門控避免重複兌換
 - 點擊倍率為 1000 倍
 - 修改前自動備份原始 `Assembly-CSharp.dll`
 - 遊戲執行中會拒絕修改 DLL
@@ -30,12 +30,12 @@ Steam\steamapps\common\BongoCat
 
 ## Token 與倒數計時
 
-`StockRefreshSeconds` 設定的是本機檢查與失敗重試週期，不是 Steam 伺服器的寶箱發放週期。預設值 `300` 表示每五分鐘檢查一次庫存中的寶箱 Token。
+遊戲原始寶箱週期為 `1800` 秒（30 分鐘），因此補丁的 `StockRefreshSeconds` 預設也設為 `1800`。遊戲每 60 秒向 Steam 發送掉落請求，但是否發放仍由 Steam 伺服器決定；每分鐘請求不代表每分鐘必定取得 Token。
 
-- 倒數結束且已有 Token：寵物點數足夠時會自動開箱，實際物品由 Steam 發放。
-- 倒數結束但沒有 Token：不執行無效兌換，倒數會重新從五分鐘開始。
-- 倒數重新開始但沒有收到寶箱，通常表示 Steam 尚未發放 Token，不代表補丁失效。
-- 修改 DLL 無法強制 Steam 每五分鐘產生 Token，也不能繞過 Steam 的伺服器庫存與掉落規則。
+- Token 先到、倒數未結束：最多約 1 秒內自動開箱，不再等待倒數。
+- 沒有 Token：不執行無效兌換；每次 Steam 掉落回呼都會記錄結果並重新讀取庫存。
+- 兌換失敗：立即重新整理 Steam 全量庫存，60 秒後再嘗試，不會在同一時間連續送出五次兌換。
+- 修改 DLL 無法強制 Steam 產生 Token，也不能繞過 Steam 的伺服器庫存與掉落規則。
 
 舊版補丁在沒有 Token 時可能反覆嘗試兌換，並在記錄檔中出現：
 
@@ -44,7 +44,7 @@ SteamExchange | Not enough items to exchange for Chest Exchange, missing 1 of Ch
 Chest Exchange failed after multiple retries, giving up!
 ```
 
-`v1.0.5` 起會保留真實 Token 檢查，避免這類 Steam Error。Windows 記錄檔位於：
+補丁會保留真實 Token 檢查，避免這類 Steam Error。雙擊 `BongoCatPatcher\Watch-ChestClaimLog.cmd` 可即時查看領取流程；`TOKEN RECEIVED` 表示 Token 到帳，`CLAIM SUCCESS` 表示已領到，`NO TOKEN` 或 `CLAIM FAILED` 表示尚未領到且會繼續重試。Windows 記錄檔位於：
 
 ```text
 %USERPROFILE%\AppData\LocalLow\Irox Games\BongoCat\Player.log
@@ -63,6 +63,9 @@ Chest Exchange failed after multiple retries, giving up!
 ```powershell
 # 關閉自動開箱，同時保留其他設定
 .\Patch-BongoCat.ps1 -DisableAutoBuy
+
+# 自訂 Token 延遲或失敗後的重查時間
+.\Patch-BongoCat.ps1 -TokenRetrySeconds 60
 
 # 將點擊倍率還原為 1
 .\Patch-BongoCat.ps1 -ClickMultiplier 1
