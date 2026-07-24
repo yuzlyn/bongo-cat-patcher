@@ -344,6 +344,15 @@ try {
         $stockTokenRetrySite.RetryWaitInstruction.Operand = [int]$StockRefreshSeconds
         $changes += "Stock-token retry wait: $oldRetryWait -> $StockRefreshSeconds seconds"
     }
+    if (-not $stockTokenRetrySite.IsPatched) {
+        $tokenInstructions = $stockTokenRetrySite.Method.Body.Instructions
+        $branchIndex = $tokenInstructions.IndexOf($stockTokenRetrySite.BranchInstruction)
+        $readyInstruction = $stockTokenRetrySite.BranchInstruction.Operand
+        $stockTokenRetrySite.BranchInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Pop
+        $stockTokenRetrySite.BranchInstruction.Operand = $null
+        $tokenInstructions.Insert($branchIndex + 1, [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Br, $readyInstruction))
+        $changes += "Stock-token check: bypassed in $($stockTokenRetrySite.Method.Name)"
+    }
 
     if ($changes.Count -eq 0) {
         Write-Host 'No changes needed; the requested settings are already applied.'
