@@ -189,17 +189,12 @@ function Find-StockTokenRetrySite {
             Method = $timerMoveNext
             QuantityInstruction = $instructions[$i]
             BranchInstruction = $branch
+            RetryWaitInstruction = $instructions[$i + $retryOffset]
             IsPatched = $isPatched
         }
     }
 
     throw 'Could not find the stock-token retry branch in Shop.TimerUpdate. The game version may be unsupported.'
-}
-
-function Test-StockTokenRetryPatch {
-    param($Site)
-
-    return $Site.IsPatched
 }
 
 function Assert-GameIsClosed {
@@ -343,14 +338,11 @@ try {
     }
 
     $stockTokenRetrySite = Find-StockTokenRetrySite $module $shop $stockTimeLeftField
-    if (-not (Test-StockTokenRetryPatch $stockTokenRetrySite)) {
-        $tokenInstructions = $stockTokenRetrySite.Method.Body.Instructions
-        $branchIndex = $tokenInstructions.IndexOf($stockTokenRetrySite.BranchInstruction)
-        $readyInstruction = $stockTokenRetrySite.BranchInstruction.Operand
-        $stockTokenRetrySite.BranchInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Pop
-        $stockTokenRetrySite.BranchInstruction.Operand = $null
-        $tokenInstructions.Insert($branchIndex + 1, [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Br, $readyInstruction))
-        $changes += "Stock-token wait: bypassed in $($stockTokenRetrySite.Method.Name)"
+    $oldRetryWait = $stockTokenRetrySite.RetryWaitInstruction.GetLdcI4Value()
+    if ($oldRetryWait -ne $StockRefreshSeconds) {
+        $stockTokenRetrySite.RetryWaitInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Ldc_I4
+        $stockTokenRetrySite.RetryWaitInstruction.Operand = [int]$StockRefreshSeconds
+        $changes += "Stock-token retry wait: $oldRetryWait -> $StockRefreshSeconds seconds"
     }
 
     if ($changes.Count -eq 0) {
