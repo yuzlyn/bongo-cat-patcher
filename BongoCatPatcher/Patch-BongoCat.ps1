@@ -145,6 +145,63 @@ function Test-AutoBuyPatch {
         (Test-MethodCall $instructions[$exitIndex - 1] 'BongoCat.ShopItem' 'Buy'))
 }
 
+function Find-StockTokenRetrySite {
+    param($Module, $ShopType, $StockTimeLeftField)
+
+    $timerMoveNext = Get-SingleItem ($Module.GetTypes() | Where-Object {
+        $_.DeclaringType -eq $ShopType -and $_.Name -like '<TimerUpdate>*'
+    } | ForEach-Object {
+        $_.Methods | Where-Object { $_.HasBody -and $_.Name -eq 'MoveNext' }
+    }) 'Shop.TimerUpdate state machine MoveNext method'
+
+    $instructions = $timerMoveNext.Body.Instructions
+    for ($i = 0; $i -lt ($instructions.Count - 4); $i++) {
+        if (-not (Test-MethodCall $instructions[$i] 'Heathen.SteamworksIntegration.ItemData' 'GetTotalQuantity')) {
+            continue
+        }
+
+        $branch = $instructions[$i + 1]
+        $isPatched = $false
+        if ($branch.OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Pop -and
+            $instructions[$i + 2].OpCode.Code -eq [dnlib.DotNet.Emit.Code]::Br) {
+            $branch = $instructions[$i + 2]
+            $isPatched = $true
+        }
+
+        if ($branch.OpCode.Code -ne [dnlib.DotNet.Emit.Code]::Brtrue -and
+            $branch.OpCode.Code -ne [dnlib.DotNet.Emit.Code]::Brtrue_S -and
+            $branch.OpCode.Code -ne [dnlib.DotNet.Emit.Code]::Br -and
+            $branch.OpCode.Code -ne [dnlib.DotNet.Emit.Code]::Br_S) {
+            continue
+        }
+        if ($null -eq $branch.Operand) {
+            continue
+        }
+
+        $retryOffset = if ($isPatched) { 4 } else { 3 }
+        if (-not $instructions[$i + $retryOffset].IsLdcI4() -or
+            $instructions[$i + $retryOffset].GetLdcI4Value() -ne 60 -or
+            -not (Test-FieldInstruction $instructions[$i + $retryOffset + 1] $StockTimeLeftField)) {
+            continue
+        }
+
+        return [pscustomobject]@{
+            Method = $timerMoveNext
+            QuantityInstruction = $instructions[$i]
+            BranchInstruction = $branch
+            IsPatched = $isPatched
+        }
+    }
+
+    throw 'Could not find the stock-token retry branch in Shop.TimerUpdate. The game version may be unsupported.'
+}
+
+function Test-StockTokenRetryPatch {
+    param($Site)
+
+    return $Site.IsPatched
+}
+
 function Assert-GameIsClosed {
     $process = Get-Process -Name 'BongoCat' -ErrorAction SilentlyContinue
     if ($process) {
@@ -202,6 +259,7 @@ try {
     $pets = Get-SingleItem ($module.GetTypes() | Where-Object FullName -eq 'BongoCat.Pets') 'BongoCat.Pets type'
     $shopItemField = Get-SingleItem ($shop.Fields | Where-Object Name -eq '_shopItem') 'Shop._shopItem field'
     $stockField = Get-SingleItem ($shop.Fields | Where-Object Name -eq '_stockRefreshTime') 'Shop._stockRefreshTime field'
+    $stockTimeLeftField = Get-SingleItem ($shop.Fields | Where-Object Name -eq 'StockRefreshTimeLeft') 'Shop.StockRefreshTimeLeft field'
     $buyMethod = Get-SingleItem (($module.GetTypes() | Where-Object FullName -eq 'BongoCat.ShopItem').Methods | Where-Object {
         $_.Name -eq 'Buy' -and $_.Parameters.Count -eq 1
     }) 'ShopItem.Buy method'
@@ -282,6 +340,17 @@ try {
         $autoInstructions.Insert($exitIndex + 1, [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Ldfld, $shopItemField))
         $autoInstructions.Insert($exitIndex + 2, [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Callvirt, $buyMethod))
         $changes += "Automatic chest purchase: enabled in $($autoBuySite.Method.Name)"
+    }
+
+    $stockTokenRetrySite = Find-StockTokenRetrySite $module $shop $stockTimeLeftField
+    if (-not (Test-StockTokenRetryPatch $stockTokenRetrySite)) {
+        $tokenInstructions = $stockTokenRetrySite.Method.Body.Instructions
+        $branchIndex = $tokenInstructions.IndexOf($stockTokenRetrySite.BranchInstruction)
+        $readyInstruction = $stockTokenRetrySite.BranchInstruction.Operand
+        $stockTokenRetrySite.BranchInstruction.OpCode = [dnlib.DotNet.Emit.OpCodes]::Pop
+        $stockTokenRetrySite.BranchInstruction.Operand = $null
+        $tokenInstructions.Insert($branchIndex + 1, [dnlib.DotNet.Emit.Instruction]::new([dnlib.DotNet.Emit.OpCodes]::Br, $readyInstruction))
+        $changes += "Stock-token wait: bypassed in $($stockTokenRetrySite.Method.Name)"
     }
 
     if ($changes.Count -eq 0) {
