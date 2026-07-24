@@ -1,5 +1,7 @@
 # Bongo Cat DLL 補丁器
 
+**繁體中文 (zh-TW)** | [English (en-US)](README-en-US.md)
+
 適用於 Steam 版 Bongo Cat 的可攜式 DLL 補丁工具，不需要安裝 dnSpy 或 .NET SDK。
 
 ## 預設功能
@@ -7,7 +9,6 @@
 - 自動購買已刷新的寶箱
 - 寶箱檢查與失敗重試時間為 300 秒（五分鐘）
 - 點擊倍率為 1000 倍
-- CMD 操作提示同時顯示繁體中文（zh-TW）與英文（en-US）
 - 修改前自動備份原始 `Assembly-CSharp.dll`
 - 遊戲執行中會拒絕修改 DLL
 

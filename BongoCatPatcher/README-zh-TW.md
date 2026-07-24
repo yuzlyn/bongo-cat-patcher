@@ -1,11 +1,12 @@
 # Bongo Cat DLL 補丁器
 
+**繁體中文 (zh-TW)** | [English (en-US)](README-en-US.md)
+
 本工具會修改遊戲目錄中的 `BongoCat_Data/Managed/Assembly-CSharp.dll`，預設設定如下：
 
 - 自動購買已刷新的寶箱
 - 寶箱檢查與失敗重試時間為 300 秒
 - 點擊倍率為 1000 倍
-- CMD 操作提示同時顯示繁體中文（zh-TW）與英文（en-US）
 
 ## 使用方式
 
