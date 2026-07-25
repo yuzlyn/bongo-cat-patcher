@@ -6,8 +6,7 @@ A portable DLL patcher for the Steam version of Bongo Cat. It does not require d
 
 ## Default Features
 
-- Automatically purchases refreshed chests
-- Uses the Steam token-arrival callback to trigger one immediate claim, then restores the gate to prevent duplicate exchanges
+- When the game has determined that a chest can be purchased, automatically call its existing purchase and chest-opening flow
 - Applies a 1000x click multiplier
 - Automatically backs up the original `Assembly-CSharp.dll` before patching
 - Refuses to modify the DLL while the game is running
@@ -28,45 +27,21 @@ Steam\steamapps\common\BongoCat
 
 You can also select Bongo Cat in your Steam library, then choose Manage > Browse local files.
 
-## Tokens and Countdown
+## Chest Behavior
 
-The game's original chest interval is `1800` seconds (30 minutes), so the patch uses `1800` as the default `StockRefreshSeconds`. The game sends a drop request to Steam every 60 seconds, but Steam still decides whether to grant a token; one request per minute does not guarantee one token per minute.
-
-- If a token arrives before the countdown ends, the patch automatically opens the chest within about one second.
-- If no token is available, no invalid exchange is attempted. Every Steam drop callback is logged and requests a full inventory refresh.
-- After a failed exchange, the patch refreshes the complete Steam inventory and retries after 60 seconds instead of sending five immediate exchange requests.
-- Modifying the DLL cannot force Steam to generate a token or bypass Steam's server-side inventory and drop rules.
-
-Older patch versions could repeatedly attempt an exchange without a token, producing these log messages:
-
-```text
-SteamExchange | Not enough items to exchange for Chest Exchange, missing 1 of Chest Token
-Chest Exchange failed after multiple retries, giving up!
-```
-
-The patch preserves the real token check to prevent this Steam Error. Double-click `BongoCatPatcher\Watch-ChestClaimLog.cmd` to follow the result: `TOKEN RECEIVED` means the token arrived, `CLAIM SUCCESS` means it was claimed, and `NO TOKEN` or `CLAIM FAILED` means refresh/retry remains active. On Windows, the game log is located at:
-
-```text
-%USERPROFILE%\AppData\LocalLow\Irox Games\BongoCat\Player.log
-```
+The patch does not change countdowns, Steam token checks, inventory refreshes, failure retries, or exchange retry counts. Steam's original flow still decides when a chest is available and how it is exchanged; the patch only replaces one mouse click after the game has already confirmed that purchase is available.
 
 ## Custom Parameters
 
 Open PowerShell in the `BongoCatPatcher` folder and run:
 
 ```powershell
-.\Patch-BongoCat.ps1 -StockRefreshSeconds 600 -ClickMultiplier 100
+.\Patch-BongoCat.ps1 -ClickMultiplier 100
 ```
 
 Other common options:
 
 ```powershell
-# Disable automatic chest opening while keeping other settings
-.\Patch-BongoCat.ps1 -DisableAutoBuy
-
-# Change the recheck delay after a delayed token or failed exchange
-.\Patch-BongoCat.ps1 -TokenRetrySeconds 60
-
 # Restore the click multiplier to 1
 .\Patch-BongoCat.ps1 -ClickMultiplier 1
 
