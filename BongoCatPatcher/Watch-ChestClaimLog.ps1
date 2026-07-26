@@ -8,6 +8,7 @@ param(
 
 $logPath = Join-Path $env:USERPROFILE 'AppData\LocalLow\Irox Games\BongoCat\Player.log'
 $patterns = @(
+    '[BongoCatPatcher] Chest token and payment ready',
     'Chest Exchange failed',
     'SteamExchange | Not enough items'
 )
@@ -17,7 +18,7 @@ if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
 }
 
 Write-Host "Watching chest claim log: $logPath"
-Write-Host 'This patch no longer injects claim logs. This watcher only shows chest-exchange errors emitted by the game.'
+Write-Host 'Shows automatic claim starts and chest-exchange errors.'
 
 function Write-ChestLines {
     process {

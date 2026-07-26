@@ -6,7 +6,7 @@ This tool modifies `BongoCat_Data/Managed/Assembly-CSharp.dll` in the game direc
 
 - Set chest countdowns and Steam drop events to 15 minutes, then use the Steam drop callback to start the existing purchase and opening flow only after the token is present.
 - Apply a configurable click multiplier, 1000x by default.
-- When joining a multiplayer lobby, place cats along the right screen edge first, with the top edge as a secondary placement. Each cat rotates so its bottom faces the edge it occupies, rather than scattering upright cats across the desktop.
+- When joining a multiplayer lobby, place cats tightly along the right, top, left, then bottom screen edges. Each cat rotates so its bottom faces the edge it occupies, rather than scattering upright cats across the desktop.
 
 ## Usage
 
@@ -28,7 +28,7 @@ Open PowerShell in this folder and run:
 .\Patch-BongoCat.ps1 -ClickMultiplier 100
 ```
 
-The patch removes the legacy popup-triggered auto-purchase hook. A Steam inventory-drop callback wakes the shop check; the original purchase and opening flow is called only when `Chest_Token` or `Emote_Chest_Token` exists, the game marks the chest ready, and the normal payment condition passes. If a token has not synchronized yet, the next check waits for the full 15-minute event instead of sending an exchange request every 60 seconds.
+The patch removes the legacy popup-triggered auto-purchase hook. A Steam inventory-drop callback wakes the shop check; the original purchase and opening flow is called only when `Chest_Token` or `Emote_Chest_Token` exists, the game marks the chest ready, and the normal payment condition passes. If the countdown reaches `00:00` before a token synchronizes, the chest remains pending and only local inventory state is checked. No repeated Steam exchange request is sent, and the original exchange starts as soon as the token appears.
 
 Other options:
 

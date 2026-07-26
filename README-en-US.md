@@ -8,7 +8,7 @@ A portable DLL patcher for the Steam version of Bongo Cat. It does not require d
 
 - When the game has determined that a chest can be purchased, automatically call its existing purchase and chest-opening flow
 - Applies a 1000x click multiplier
-- When joining a multiplayer lobby, place other players' cats along the right or top screen edge with each cat's bottom facing its edge
+- When joining a multiplayer lobby, tightly place other players' cats along the right, top, left, then bottom screen edges with each cat's bottom facing its edge
 - Automatically backs up the original `Assembly-CSharp.dll` before patching
 - Refuses to modify the DLL while the game is running
 
@@ -30,7 +30,7 @@ You can also select Bongo Cat in your Steam library, then choose Manage > Browse
 
 ## Chest Behavior
 
-The patch sets chest and Steam drop checks to 15 minutes. After a Steam drop callback, it calls the game's original purchase and chest-opening flow only when the token exists, the game marks the chest ready, and the normal payment condition passes. A missing token or failed exchange waits for the next 15-minute event rather than retrying every 60 seconds.
+The patch keeps chest and Steam drop checks on the official 15-minute interval. After the 15-minute event, the Steam drop callback only wakes a local shop check; the game's original purchase and chest-opening flow is called only when `Chest_Token` or `Emote_Chest_Token` has synchronized, the game marks the chest ready, and the normal payment condition passes. A missing token or failed exchange keeps the chest pending and continues checking local inventory state, without sending repeated Steam exchange requests every 60 seconds.
 
 ## Custom Parameters
 
